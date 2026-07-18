@@ -1,0 +1,20 @@
+[project]
+name = "edumaze"
+version = "0.1.0"
+description = "Universal, code-first exploratory tester: model a web app as a maze, walk it, report breakage."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.40"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+edumaze = "edumaze.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["edumaze*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
