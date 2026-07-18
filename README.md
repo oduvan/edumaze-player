@@ -11,15 +11,20 @@ full design.
 
 ## Status
 
-Framework core is built and tested (browser-free, via an in-memory driver):
+Framework core is built, unit-tested (browser-free, via an in-memory driver),
+**and validated against a live site** (`sites/edumaze/maze.py` walks
+`edumaze.lyabah.com` with the real Playwright driver):
 
 - `edumaze/` — the framework: `Node`, `Site`, `Role`, `Budgets`, the walk `Player`,
   matcher, oracles (L1 technical + acceptance, L2 differential), safety policy,
-  and a real-browser Playwright adapter (optional).
+  locators (role / placeholder / text / css), SPA settle-polling, and a
+  real-browser Playwright adapter.
 - `edumaze/drivers/fake.py` — an in-memory driver to exercise a maze without a
   browser (used by the tests, and handy for maze authors).
 - `tests/example_maze.py` — a reference hand-written maze + matching fake app,
   with two deliberately broken states.
+- `sites/edumaze/maze.py` — a real maze for a live SPA (landing → create game →
+  lobby → exit).
 
 Not built yet: the **crawl skill** (generate a maze from a live site) and the
 **triage skill** (classify/prioritize reports).

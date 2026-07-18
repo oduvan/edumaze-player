@@ -16,7 +16,7 @@ from typing import List, Optional, Type
 
 from . import matcher, oracles, policy
 from .materialize import materialize
-from .node import BACK, SUBMIT, Node, Option
+from .node import BACK, SUBMIT, Locator, Node, Option
 from .page import ElementNotFound, Page
 from .report import Finding, Report
 from .site import Site
@@ -26,16 +26,21 @@ from .strategy import Strategy
 class Player:
     def __init__(self, site: Site, page: Page, seed: int = 0,
                  mode: str = policy.EXPLORE, walk: str = "coverage",
-                 baseline: Optional[dict] = None) -> None:
+                 baseline: Optional[dict] = None,
+                 settle_timeout_ms: int = 4000,
+                 settle_interval_ms: int = 250) -> None:
         self.site = site
         self.page = page
         self.seed = seed
         self.mode = mode              # safety: explore | chaos
         self.walk = walk              # strategy: coverage | random
         self.baseline = baseline
+        self.settle_timeout_ms = settle_timeout_ms
+        self.settle_interval_ms = settle_interval_ms
         self.nodes: List[Type[Node]] = site.nodes()
         self.strategy = Strategy(seed, mode=("random" if walk == "random" else "coverage"))
         self._log: List[dict] = []
+        self._avoid: Optional[Type[Node]] = None  # node we just left, awaiting change
         self._report = Report(site_id=site.site_id, seed=seed, mode=f"{mode}/{walk}")
 
     # -- public ------------------------------------------------------------
@@ -47,7 +52,7 @@ class Player:
         max_restarts = 4 * len(self.nodes) + 5
 
         while self._report.actions_taken < budget:
-            match = matcher.resolve(page, self.nodes)
+            match = self._resolve_settled(page)
 
             if match.ambiguous:
                 self._finding(Finding(
@@ -81,14 +86,33 @@ class Player:
                         break
                     restarts += 1
                     self._enter(page)
+                    self._avoid = None
                     continue
                 else:
                     break  # every allowed edge covered
 
             self._take(choice, node_cls.__name__, page)
+            # If we expect to land somewhere new, remember what to wait past.
+            self._avoid = (node_cls if choice.to is not None
+                           and choice.to is not node_cls else None)
 
         self._run_l2()
         return self._report
+
+    def _resolve_settled(self, page: Page) -> "matcher.Match":
+        """Resolve the current state, polling until it settles past the node we
+        just left (SPA re-renders are async), or the settle budget expires."""
+        match = matcher.resolve(page, self.nodes)
+        waited = 0
+        while waited < self.settle_timeout_ms:
+            if match.ambiguous:
+                break
+            if match.node is not None and match.node is not self._avoid:
+                break
+            page.wait(self.settle_interval_ms)
+            waited += self.settle_interval_ms
+            match = matcher.resolve(page, self.nodes)
+        return match
 
     # -- walk mechanics ----------------------------------------------------
     def _take(self, option: Option, from_node: str, page: Page) -> None:
@@ -107,9 +131,12 @@ class Player:
             page.back()
             return
         if option.kind == SUBMIT:
-            for field_label, semantic in option.fields.items():
+            for field, semantic in option.fields.items():
                 value = self.site.seed_data.get(semantic, semantic)
-                page.by_role("textbox", name=field_label).fill(value)
+                if isinstance(field, Locator):
+                    field.resolve(page).fill(value)
+                else:
+                    page.by_role("textbox", name=field).fill(value)
             assert option.locator is not None
             option.locator.resolve(page).click()
             return

@@ -58,6 +58,9 @@ class PlaywrightPage:
         self._reset_page_signals()
         self._page.go_back()
 
+    def wait(self, ms: int) -> None:
+        self._page.wait_for_timeout(ms)
+
     def by_role(self, role: str, name: Optional[str] = None):
         loc = (self._page.get_by_role(role, name=name) if name
                else self._page.get_by_role(role))
@@ -65,6 +68,9 @@ class PlaywrightPage:
 
     def by_text(self, text: str):
         return _Loc(self._page.get_by_text(text), self)
+
+    def by_placeholder(self, text: str):
+        return _Loc(self._page.get_by_placeholder(text), self)
 
     def by_css(self, selector: str):
         return _Loc(self._page.locator(selector), self)

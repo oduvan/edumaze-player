@@ -25,18 +25,39 @@ BACK = "back"
 
 @dataclass(frozen=True)
 class Locator:
-    role: Optional[str] = None
+    role_: Optional[str] = None
     name: Optional[str] = None
-    text: Optional[str] = None
-    css: Optional[str] = None
+    text_: Optional[str] = None
+    placeholder_: Optional[str] = None
+    css_: Optional[str] = None
+
+    # Constructors — accessible-first, but real inputs often only have a
+    # placeholder, so that's a first-class strategy too.
+    @staticmethod
+    def role(role: str, name: Optional[str] = None) -> "Locator":
+        return Locator(role_=role, name=name)
+
+    @staticmethod
+    def text(value: str) -> "Locator":
+        return Locator(text_=value)
+
+    @staticmethod
+    def placeholder(value: str) -> "Locator":
+        return Locator(placeholder_=value)
+
+    @staticmethod
+    def css(selector: str) -> "Locator":
+        return Locator(css_=selector)
 
     def resolve(self, page: Page):
-        if self.role is not None:
-            return page.by_role(self.role, self.name)
-        if self.text is not None:
-            return page.by_text(self.text)
-        if self.css is not None:
-            return page.by_css(self.css)
+        if self.role_ is not None:
+            return page.by_role(self.role_, self.name)
+        if self.placeholder_ is not None:
+            return page.by_placeholder(self.placeholder_)
+        if self.text_ is not None:
+            return page.by_text(self.text_)
+        if self.css_ is not None:
+            return page.by_css(self.css_)
         raise ValueError("empty locator")
 
 
@@ -85,17 +106,18 @@ class Node:
     def go(self, name: str, to: Optional[Type["Node"]] = None,
            classify: str = SAFE, role: str = "link") -> Option:
         return Option(GO, name, to=to, classify=classify,
-                      locator=Locator(role=role, name=name))
+                      locator=Locator.role(role, name))
 
-    def submit(self, form: str, fields: Dict[str, str],
-               to: Optional[Type["Node"]] = None, classify: str = SAFE,
-               button: Optional[str] = None) -> Option:
+    def submit(self, form: str, fields: Dict, to: Optional[Type["Node"]] = None,
+               classify: str = SAFE, button: Optional[str] = None) -> Option:
+        # fields keys may be a plain str (targets textbox by accessible name) or
+        # a Locator (e.g. Locator.placeholder(...)); values are seed_data semantics.
         return Option(SUBMIT, form, to=to, classify=classify, fields=dict(fields),
-                      locator=Locator(role="button", name=button or form))
+                      locator=Locator.role("button", button or form))
 
     def external(self, name: str, role: str = "link") -> Option:
         return Option(GO, name, to=None, classify=EXTERNAL,
-                      locator=Locator(role=role, name=name))
+                      locator=Locator.role(role, name))
 
     def back(self, to: Optional[Type["Node"]] = None) -> Option:
         return Option(BACK, "<back>", to=to, classify=SAFE)

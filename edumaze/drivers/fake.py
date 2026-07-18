@@ -19,6 +19,7 @@ class FakeElement:
     role: str
     name: str = ""
     text: str = ""
+    placeholder: str = ""
     #: State to navigate to when clicked (None = inert, e.g. a text field).
     on_click: Optional[str] = None
 
@@ -53,14 +54,17 @@ class _Handle:
     """A lazy query handle satisfying the Element protocol."""
 
     def __init__(self, page: "FakePage", role: Optional[str],
-                 name: Optional[str], text: Optional[str]) -> None:
+                 name: Optional[str], text: Optional[str],
+                 placeholder: Optional[str] = None) -> None:
         self._page = page
         self._role = role
         self._name = name
         self._text = text
+        self._placeholder = placeholder
 
     def _find(self) -> Optional[FakeElement]:
-        return self._page._find(self._role, self._name, self._text)
+        return self._page._find(self._role, self._name, self._text,
+                                self._placeholder)
 
     def visible(self) -> bool:
         return self._find() is not None
@@ -117,6 +121,10 @@ class FakePage:
         return list(self._state.console_errors)
 
     # -- navigation --------------------------------------------------------
+    def wait(self, ms: int) -> None:
+        # transitions are instantaneous in the fake; nothing to settle.
+        return None
+
     def goto(self, path: str) -> None:
         name = self._site.state_for_url(path)
         self._navigate(name if name is not None else self._site.start)
@@ -140,13 +148,17 @@ class FakePage:
     def by_text(self, text: str) -> _Handle:
         return _Handle(self, None, None, text)
 
+    def by_placeholder(self, text: str) -> _Handle:
+        return _Handle(self, None, None, None, placeholder=text)
+
     def by_css(self, selector: str) -> _Handle:
         # CSS isn't modeled; treat the selector as a text probe so mazes that
         # fall back to CSS still run (and simply won't match here).
         return _Handle(self, None, None, selector)
 
     def _find(self, role: Optional[str], name: Optional[str],
-              text: Optional[str]) -> Optional[FakeElement]:
+              text: Optional[str],
+              placeholder: Optional[str] = None) -> Optional[FakeElement]:
         for el in self._state.elements:
             if role is not None and el.role != role:
                 continue
@@ -154,7 +166,9 @@ class FakePage:
                 continue
             if text is not None and text not in el.text:
                 continue
-            if role is None and text is None:
+            if placeholder is not None and el.placeholder != placeholder:
+                continue
+            if role is None and text is None and placeholder is None:
                 continue  # empty query matches nothing
             return el
         return None

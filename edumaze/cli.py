@@ -64,7 +64,7 @@ def main(argv=None) -> int:
         report = Player(site, page, seed=args.seed, mode=args.mode,
                         walk=args.walk, baseline=baseline).run()
 
-    print(json.dumps(report.to_dict(), indent=2))
+    print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
     return 1 if report.findings else 0
 
 
