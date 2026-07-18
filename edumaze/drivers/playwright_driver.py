@@ -75,32 +75,98 @@ class PlaywrightPage:
     def by_css(self, selector: str):
         return _Loc(self._page.locator(selector), self)
 
+    def dismiss_overlays(self) -> bool:
+        """Best-effort close of cookie banners / marketing popups that intercept
+        clicks. Returns True if it dismissed (or plausibly dismissed) something."""
+        acted = False
+        try:
+            self._page.keyboard.press("Escape")
+        except Exception:
+            pass
+        close_selectors = [
+            "[class*='om-close']", "[id^='om-'] [class*='close']", "[id^='om-'] button",
+            "button[aria-label*='close' i]", "[aria-label*='Close' i]",
+            "button:has-text('No thanks')", "button:has-text('Close')",
+            ".sequoyah-close", "#onetrust-accept-btn-handler",
+            "button:has-text('Accept All')", "button:has-text('Accept')",
+        ]
+        for sel in close_selectors:
+            try:
+                loc = self._page.locator(sel)
+                for i in range(min(loc.count(), 3)):
+                    el = loc.nth(i)
+                    if el.is_visible():
+                        el.click(timeout=1200, force=True)
+                        acted = True
+            except Exception:
+                continue
+        return acted
+
 
 class _Loc:
+    """Wraps a Playwright locator that may match several elements.
+
+    Real sites duplicate labels (a hidden hover-menu link *and* a visible footer
+    link share the accessible name), so this targets the *visible* match rather
+    than blindly ``.first``, and scrolls via JS (Playwright's auto-scroll stalls
+    on tall lazy pages) before clicking.
+    """
+
     def __init__(self, locator, page: PlaywrightPage) -> None:
-        self._loc = locator.first
+        self._raw = locator
         self._page = page
 
-    def visible(self) -> bool:
+    def _visible_elements(self) -> list:
         try:
-            return self._loc.is_visible()
+            n = self._raw.count()
         except Exception:
-            return False
+            return []
+        out = []
+        for i in range(min(n, 25)):
+            el = self._raw.nth(i)
+            try:
+                if el.is_visible():
+                    out.append(el)
+            except Exception:
+                continue
+        return out
+
+    def visible(self) -> bool:
+        return len(self._visible_elements()) > 0
 
     exists = visible
 
     def text(self) -> str:
+        els = self._visible_elements()
         try:
-            return self._loc.inner_text()
+            return (els[0] if els else self._raw.first).inner_text()
         except Exception:
             return ""
 
     def click(self) -> None:
         self._page._reset_page_signals()
-        self._loc.click()
+        last_err = None
+        for attempt in range(3):
+            candidates = self._visible_elements() or [self._raw.first]
+            for el in candidates:
+                try:
+                    el.evaluate("e => e.scrollIntoView({block: 'center'})")
+                except Exception:
+                    pass
+                try:
+                    el.click(timeout=4000)
+                    return
+                except Exception as exc:  # try the next visible match
+                    last_err = exc
+            # a click was blocked — often a popup/cookie overlay. Clear it & retry.
+            if not self._page.dismiss_overlays():
+                break
+        if last_err is not None:
+            raise last_err
 
     def fill(self, value: str) -> None:
-        self._loc.fill(value)
+        els = self._visible_elements()
+        (els[0] if els else self._raw.first).fill(value)
 
 
 def launch(base_url: str, headless: bool = True):

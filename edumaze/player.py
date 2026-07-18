@@ -27,7 +27,7 @@ class Player:
     def __init__(self, site: Site, page: Page, seed: int = 0,
                  mode: str = policy.EXPLORE, walk: str = "coverage",
                  baseline: Optional[dict] = None,
-                 settle_timeout_ms: int = 4000,
+                 settle_timeout_ms: int = 6000,
                  settle_interval_ms: int = 250) -> None:
         self.site = site
         self.page = page
@@ -120,10 +120,11 @@ class Player:
         try:
             self._execute(option, page)
         except (ElementNotFound, Exception) as exc:  # noqa: BLE001
+            detail = str(exc).splitlines()[0][:160] if str(exc) else ""
             self._finding(Finding(
                 oracle="L1", node=from_node, severity_hint="high",
                 summary=f"option '{option.label}' on {from_node} not actionable: "
-                        f"{type(exc).__name__}: {exc}"))
+                        f"{type(exc).__name__}: {detail}"))
         self._report.actions_taken += 1
 
     def _execute(self, option: Option, page: Page) -> None:
