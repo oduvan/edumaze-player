@@ -18,9 +18,10 @@ DESTRUCTIVE = "destructive"
 EXTERNAL = "external"
 
 # Option kinds.
-GO = "go"
-SUBMIT = "submit"
-BACK = "back"
+GO = "go"        # click a link/button
+SUBMIT = "submit"  # fill fields then click
+BACK = "back"    # browser back
+VISIT = "visit"  # navigate directly by URL (deep-linkable pages)
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,8 @@ class Option:
     locator: Optional[Locator] = None
     # For SUBMIT: {field_label: semantic}; values filled from Site.seed_data.
     fields: Dict[str, str] = field(default_factory=dict)
+    # For VISIT: the URL to navigate to directly.
+    target_url: Optional[str] = None
 
     @property
     def target_name(self) -> Optional[str]:
@@ -87,10 +90,14 @@ class Node:
 
     # --- identity ---------------------------------------------------------
     def matches(self, page: Page) -> bool:
-        """True if ``page`` is this state. Default: URL-suffix match."""
+        """True if ``page`` is this state. Default: exact URL-path match (so a
+        root ``url = "/"`` works, and ``/a`` never matches ``/ab``). Override for
+        content-based identity."""
         if self.url is None:
             return False
-        return _norm(page.url).endswith(_norm(self.url))
+        from urllib.parse import urlparse
+        path = _norm(urlparse(page.url).path or "/")
+        return path == _norm(self.url)
 
     # --- structure --------------------------------------------------------
     def options(self) -> List[Option]:
@@ -121,6 +128,11 @@ class Node:
 
     def back(self, to: Optional[Type["Node"]] = None) -> Option:
         return Option(BACK, "<back>", to=to, classify=SAFE)
+
+    def visit(self, name: str, url: str, to: Optional[Type["Node"]] = None,
+              classify: str = SAFE) -> Option:
+        """Navigate directly to ``url`` (for deep-linkable pages / MPA nav)."""
+        return Option(VISIT, name, to=to, classify=classify, target_url=url)
 
     @property
     def name(self) -> str:

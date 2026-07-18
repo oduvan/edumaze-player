@@ -16,7 +16,7 @@ from typing import List, Optional, Type
 
 from . import matcher, oracles, policy
 from .materialize import materialize
-from .node import BACK, SUBMIT, Locator, Node, Option
+from .node import BACK, SUBMIT, VISIT, Locator, Node, Option
 from .page import ElementNotFound, Page
 from .report import Finding, Report
 from .site import Site
@@ -127,6 +127,10 @@ class Player:
         self._report.actions_taken += 1
 
     def _execute(self, option: Option, page: Page) -> None:
+        if option.kind == VISIT:
+            assert option.target_url is not None
+            page.goto(option.target_url)
+            return
         if option.kind == BACK:
             page.back()
             return
