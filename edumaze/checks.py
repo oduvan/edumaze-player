@@ -41,6 +41,10 @@ def interact_check(state: State, page, config, steps) -> List[BreakageCase]:
     for el in state.elements():
         if not el.interactive or not el.visible:
             continue
+        if el.submit is not None:
+            # A submit button is often (correctly) disabled until the form is
+            # valid; its usability is verified by the fuzzer instead.
+            continue
         handle = el.find.resolve(page)
         if not _safe(handle.visible):
             continue  # a See failure already covers "should be visible but isn't"
