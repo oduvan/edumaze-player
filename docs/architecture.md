@@ -1,263 +1,247 @@
-# edumaze-player — Architecture Spec
+# edumaze-player — Spec (v2)
 
-A **universal, site-agnostic exploratory tester**. It models any web app as a
-**maze** (a graph of states), then a **player** walks that maze like a monkey —
-poking forms, clicking things, trying cases — and reports what's broken with a
-deterministic replay path.
-
-**The maze is code, not data.** The repo ships a framework of common modules; a
-site's maze is a self-describing Python script built from those modules. The script
-declares *what each state is, what options it offers, and its acceptance criteria*;
-all the machinery (browser driving, walk strategy, oracles, diffing, reporting,
-safety) lives behind the scenes in the framework.
-
-Three components around one shared artifact (the **maze script**):
-
-1. **Crawl skill** (Claude) — explores a site → writes `sites/<id>/maze.py`.
-2. **Player** (Python + Playwright) — imports & runs the maze → emits reports.
-3. **Triage skill** (Claude) — reads reports + the maze's git diff → real regression
-   vs. legit change, prioritizes, blesses or rejects the regenerated maze.
+> Supersedes the earlier "maze walker" spec. That version drifted into a
+> page-by-page **coverage walker**. This one is what was actually intended: a
+> cheap, deterministic **breakage-hunter** that varies inputs, sizes, toggles,
+> and paths to find *the configuration under which the site breaks* — with an
+> expensive AI on each side (one to map the site, one to triage results).
 
 ---
 
-## 1. Design decisions (locked)
+## 1. Purpose
 
-| Decision | Choice | Consequence |
-|---|---|---|
-| Config form | **Code** (Python script), not data files | Framework library + generated script; no JSON/YAML |
-| Target scope | **Universal**, not one site | Generic framework + a per-site `Site` class |
-| Target ownership | User owns the apps (staging) | Reset hooks & seeded creds *available* but optional |
-| App type | **Mixed** SPA/MPA | A state is a declared `Node`, matched by predicate — not a URL |
-| Executor | **Real browser** (Playwright) | Handles JS, forms, SPA navigation |
-| Auth | Optional, multi-role | `Role` objects with login recipes on the `Site` |
-| Maze upkeep | **Full auto-regenerate** | L2 oracle is *differential* (diff materialized graph vs git baseline) |
+Testing a site exhaustively with an AI (every path, every edge case, breaking
+forms, different screen sizes…) works but burns tokens. So split it: **spend AI
+tokens only where judgement is needed, and let a cheap deterministic script do
+the repetitive stress-testing.**
 
-### The oracle: three layers
+Three parts, one cheap core in the middle:
 
-What counts as "not working." Cheap→expensive, universal→noisy.
-
-- **L1 — Technical + node acceptance** (always on): HTTP 4xx/5xx, uncaught JS console
-  errors, network failures, timeouts, dead-ends **plus** each visited node's
-  `accept(page)` criteria (arbitrary code — the code-first win). A failing `accept`
-  is a first-class finding.
-- **L2 — Differential** (core regression signal): the framework materializes the
-  declared maze into a normalized data structure and diffs it against the
-  **previously committed baseline** (`sites/<id>/baseline.json`). An edge that used
-  to reach a state and now 404s, an option that disappeared, a new undocumented
-  state → drift. No text-diffing of Python; diff the materialized graph. Fully
-  compatible with auto-regenerate: regenerate the script, re-materialize, diff.
-- **L3 — Semantic** (opt-in, off by default): Claude-inferred "this *should* do X."
-  High false-positive rate; dormant in v1.
-
-> Why differential: auto-regenerate rewrites the acceptance criteria too, so they
-> can't be their own regression baseline. Diffing the materialized graph against the
-> last *committed* baseline makes git the source of truth.
-
----
-
-## 2. The framework (common modules, shipped in the repo)
-
-Package `edumaze/` (renameable). This is the reusable machinery the generated
-script leans on.
+- **① Explorer AI** — expensive, runs rarely. Crawls the site once and writes a
+  structured **map**: for each page, one list of **elements**, where every
+  element can be *informational* (content the user should perceive), *interactive*
+  (something the user can do), or both — and each carries a **visibility**
+  expectation (visible / hidden).
+- **② The script (stress engine)** — cheap, no tokens, deterministic. Given the
+  map, it **messes with the site**: fuzzes forms, resizes the viewport, opens
+  menus/modals, and walks different sequences — checking the expectations after
+  every variation. It emits **breakage cases**.
+- **③ Triage AI** — cheap, per case. Replays a case's exact steps, decides real
+  vs. false. Real → **alert the user**. False → **fix the script's root cause**
+  *and* **suppress every sibling case with the same signature** so the same
+  false positive isn't analysed 50 times.
 
 ```
-edumaze/
-  __init__.py       # public API: Node, Site, Role, Budgets, action helpers
-  node.py           # Node base class + option/edge helpers (go/submit/back/...)
-  site.py           # Site base class (base_url, allowlist, roles, volatile, budgets)
-  role.py           # Role + login recipe execution
-  page.py           # thin wrapper over Playwright Page (accessible-first locators)
-  matcher.py        # resolve an observed page -> declared Node (§4)
-  materialize.py    # declared maze -> normalized graph dict (for L2 diff)
-  oracles.py        # L1 (technical + accept), L2 (differential)
-  strategy.py       # coverage-guided walk w/ random mode; seeded RNG
-  policy.py         # safety policy: which edges allowed in which mode (§7)
-  player.py         # the walker: drives the browser, runs the loop
-  report.py         # Report/Finding dataclasses + serialization
-  cli.py            # `edumaze run sites/example/maze.py --mode explore --seed 123`
+        ① Explorer AI                ② Stress script              ③ Triage AI
+   crawl once, emit map  ─────▶  vary + check, emit  ─────▶  replay one case,
+   (pages, elements,             breakage cases            judge real/false
+    expectations, forms)         (config + steps +          ├─ real  → ALERT USER
+        ▲                         failed check)             └─ false → fix script +
+        │                                                             suppress siblings
+        └───────────────── script fixes / suppressions ◀────────────────┘
 ```
-
-### Base classes the script uses
-
-- **`Node`** — one state. Declares identity + options + acceptance criteria:
-  - `url` / `matches(self, page) -> bool` — how to recognize this state.
-  - `options(self) -> list[Option]` — outgoing edges, via helpers:
-    `self.go(name, to=Node, classify=...)`, `self.submit(form, fields=..., to=...)`,
-    `self.back()`. `classify ∈ {safe, destructive, external}` drives safety (§7).
-  - `accept(self, page)` — acceptance criteria as code (asserts). Runs on arrival.
-- **`Site`** — the old "manifest," now a class: `base_url`, `domain_allowlist`,
-  `entry` (start node), `roles`, `volatile` (selectors/params excluded from
-  signature + diff), `denylist`, `budgets`, `reset_hook` (optional), `seed_data`.
-- **`Role`** — `name` + a `login(page)` recipe + a `logged_in_when` check.
-- **`Budgets`** — `max_actions`, `max_depth`, `max_wall_clock_s`, `actions_per_second`.
-
-Reusable subclasses/mixins ship too (e.g. `FormPage`, `LoggedInNode`) so generated
-scripts stay short.
 
 ---
 
-## 3. The generated maze script (`sites/<id>/maze.py`)
+## 2. The map — one element list per state
 
-Self-describing, executable. The crawl skill writes this; the player runs it.
+Code-as-config (a Python script the Explorer writes; the engine imports it). Per
+**state** the map declares its **identity** plus a single list of **elements**.
+
+There are **not** two separate kinds of element. Every element can be
+**informational**, **interactive**, or **both**, and every element carries a
+**visibility** expectation. Two guarantees per page fall straight out of this:
+
+- **See** — the user sees the information they should (and not what they shouldn't).
+- **Do** — the user can actually use every element they should be able to use.
+
+Each element declares:
+
+- **`find`** — how to locate it (role+name / text / selector).
+- **`visibility`** — expected state here: `VISIBLE` or `HIDDEN`. May be
+  **conditional** — e.g. `HIDDEN until "Menu" is opened`.
+- **informational aspect** *(optional)* — the content the user should perceive
+  (e.g. the expected text).
+- **interactive aspect** *(optional)* — what the user can do, and the expected
+  effect. One of:
+  - **click** → navigates to / opens a target state;
+  - **fill** → a form field with type + constraints (required, max length, format);
+  - **submit** → with expected *valid* and *invalid* outcomes (valid succeeds;
+    invalid fails **gracefully** — an error, never a crash/blank);
+  - **toggle** → what it should **reveal** / **hide**.
+
+An element is often both: a "Menu" button is *interactive* (click toggles) and
+its own visibility is `VISIBLE`; each menu item is *informational* and
+*conditionally* `HIDDEN` until the menu opens. Visibility applies to interactive
+elements too — a submit button that should be `VISIBLE` but isn't fails the
+**Do** guarantee.
+
+Sketch (illustrative, not final API):
 
 ```python
-from edumaze import Node, Site, Role, Budgets
-
-def login_admin(page):
-    page.goto("/login")
-    page.get_by_role("textbox", name="Email").fill(env("ADMIN_EMAIL"))
-    page.get_by_role("textbox", name="Password").fill(env("ADMIN_PASSWORD"))
-    page.get_by_role("button", name="Sign in").click()
-
-class Dashboard(Node):
-    url = "/dashboard"
-    def matches(self, page):
-        return page.get_by_role("heading", name="Dashboard").is_visible()
-    def options(self):
-        return [
-            self.go("Settings", to=Settings, classify="safe"),
-            self.submit("Search", fields={"q": "text"}, to=SearchResults),
-        ]
-    def accept(self, page):
-        assert page.get_by_role("navigation").is_visible(), "nav missing"
-
-class Settings(Node):
-    url = "/settings"
-    def matches(self, page): ...
-    def options(self):
-        return [self.go("Delete account", to=Deleted, classify="destructive")]
-    def accept(self, page): ...
-
-class ExampleSite(Site):
-    base_url = "https://staging.example.com"
-    domain_allowlist = ["staging.example.com"]
-    entry = Dashboard
-    roles = [Role("admin", login=login_admin, logged_in_when=("link", "Dashboard"))]
-    volatile = ["#clock", ".feed", "input[name=csrf]"]
-    denylist = ["*/logout"]
-    budgets = Budgets(max_actions=500, actions_per_second=3)
-    seed_data = {"text": "lorem", "email": "qa+test@example.com", "number": "42"}
+class Lobby(State):
+    def identify(self, page): return "/room/" in page.url and page.heading("Лобі")
+    elements = [
+        Element(text("КОД КІМНАТИ"), visible=True, info=True),           # info only
+        Element(role("heading", "Leaderboard"), visible=False),          # must stay hidden
+        Element(role("button", "Створити гру"), visible=True,            # info + interactive
+                fill=[Field("name", REQUIRED, max_len=40)],
+                submit=Submit(on_valid=goes_to(Game), on_invalid=stays_with_error)),
+        Element(role("button", "Menu"), visible=True,                    # interactive toggle
+                toggle=Toggle(reveals=[text("Settings")], hides=[])),
+        Element(text("Settings"), visible="until Menu opened", info=True),  # conditional
+        Element(role("button", "Вийти"), visible=True, click=goes_to(Landing)),
+    ]
 ```
 
-**Locators are accessibility-first** (`get_by_role` + accessible name), not CSS or
-test-ids — so the framework works across sites whose markup we don't control. CSS is
-the fallback when no accessible handle exists. If a given app *does* have test-ids,
-a node can opt into them.
-
-Secrets come from the environment (`env(...)`), never committed.
+> The "expected elements" idea you were unsure about is now just each element's
+> `visibility` field; the interactive aspect (`click`/`fill`/`submit`/`toggle`)
+> lives on the same element.
 
 ---
 
-## 4. State identity: matching, not hashing
+## 3. The script (stress engine) — what it does
 
-A state is a declared `Node`. On arrival, `matcher.py` resolves the live page to a
-node by (a) `url` pattern then (b) `matches(page)` predicate. This replaces an opaque
-hash with declared, reviewable identity, and gives two useful signals for free:
+For each state, the engine generates **variations** across four dimensions and,
+after each, runs the **oracle**.
 
-- **Unmatched page** → an undocumented state: a finding, and a TODO for the crawl
-  skill to add a `Node`.
-- **Ambiguous match** (two nodes claim the page) → the model is too coarse; flag it.
+**Variation dimensions (v1, all four selected):**
+1. **Form fuzzing** — valid, empty, boundary, over-long, and special-character
+   inputs; assert valid→success and invalid→graceful failure (never crash/blank).
+2. **Responsive / viewport** — mobile / tablet / desktop; directly catches
+   "an important element is hidden at this size."
+3. **Interactive toggling** — open/close menus, modals, accordions, tabs; assert
+   the declared reveal/hide sets.
+4. **Navigation sequences** — different orders/paths into a state; catch state
+   that breaks depending on how you arrived.
 
-**Volatile regions** (declared on the `Site`) are stripped before matching *and* the
-L2 diff — otherwise clocks/feeds/tokens cause phantom mismatches every run.
+**The oracle (what "broken" means) — the two guarantees + signals:**
+- **See (visibility invariant)**: every element's actual state matches its
+  expected `visibility` — an element that should be `VISIBLE` but is missing or
+  `HIDDEN` fails, and so does one that should be `HIDDEN` but shows.
+- **Do (interactability invariant)**: every element with an interactive aspect is
+  actually usable (present, enabled, actionable) and produces its declared effect
+  — a link navigates, a toggle reveals/hides the right set, a valid submit
+  succeeds, an invalid submit fails gracefully.
+- **Generic signals**: dead/incorrect links, JS console or HTTP errors, and
+  **slow loads** (a load-time threshold).
+
+The four dimensions feed the two guarantees: fuzzing exercises `fill`/`submit`;
+viewport + toggling + sequences exercise `visibility` and `click`/`toggle` across
+configurations (this is where "important element hidden on mobile" surfaces).
+
+**Determinism**: `(map + seed + dimensions)` fully determines the run, so every
+breakage case replays exactly.
+
+**Safety** (unchanged, still needed): domain allowlist as a hard fence;
+destructive/external actions gated by mode; forms fuzzed only where the map marks
+them safe; polite budgets. On third-party sites: read/interact but never submit
+real leads.
 
 ---
 
-## 5. The Player (walk loop)
+## 4. Output — breakage cases (with signatures for dedup)
 
-`edumaze run sites/example/maze.py --mode explore --seed 12345`
-
-1. Import the script, materialize the declared maze, load the committed baseline.
-   Start Playwright; authenticate each `Role`.
-2. From the current node: `options()` → filter by safety policy (§7) → pick next via
-   `strategy` (bias to unvisited edges; `--mode random` for pure chaos). RNG is
-   **seeded** → reproducible walk.
-3. Execute the action. Run L1 (technical + `accept`). Resolve the new node (§4).
-4. Run L2 differential against baseline; record divergences.
-5. On failure or budget exhaustion, stop. Emit reports + refresh `baseline.json`.
-
-Reproducibility contract: `(maze commit, seed, optional reset_hook)` →
-byte-identical walk. Every finding is therefore a runnable replay script.
-
-### Report — `reports/<id>/<run_id>.json`
+The script returns a list of **breakage cases**. Each is:
 
 ```json
 {
-  "run_id": "…", "site_id": "…", "seed": 12345, "maze_commit": "<git sha>",
-  "findings": [{
-    "oracle": "L1|L2", "severity_hint": "high|med|low",
-    "summary": "Node 'Search' accept() failed: results container missing",
-    "path": [{"node": "Dashboard", "action": {"submit": "Search"}}, "…"],
-    "evidence": {"http_status": 500, "console": ["…"], "screenshot": "…png"}
-  }]
+  "signature": "Lobby|see|room-code-panel|viewport=mobile",
+  "state": "Lobby",
+  "config": {"viewport": "mobile", "inputs": {...}, "toggles": [...], "path": [...]},
+  "check": "see: 'КОД КІМНАТИ' expected VISIBLE, was HIDDEN",
+  "steps": [ {"action": "...", ...}, ... ],   // exact replay from entry
+  "evidence": {"screenshot": "...", "console": [...], "load_ms": 5200}
 }
 ```
 
----
-
-## 6. (reserved)
-
----
-
-## 7. Safety policy (universal, degrades gracefully)
-
-Universal ⇒ can't assume a reset endpoint. Safety is layered so it's safe *without*
-one:
-
-- **Domain allowlist is a hard wall.** Off-allowlist → abort + flag.
-- **`external` options** (OAuth, payment, `mailto:`, off-domain) are recorded as
-  boundary nodes, never traversed.
-- **`classify` governs modes:**
-  - `explore` (default): `safe` options only. Read-mostly. Safe with **no** reset hook.
-  - `chaos`: also `destructive` options — **only when a `reset_hook` is declared**,
-    so damage is undone between runs.
-- **Denylist** always wins, every mode.
-- **Budgets + politeness cap** guarantee termination and bounded load.
-- **Kill-switch invariants:** off-domain / forbidden-URL → abort + flag.
-- **Prod guard:** refuse unless `base_url` host ∈ `domain_allowlist`; require an
-  explicit ack to run destructive mode with no `reset_hook`.
+The **`signature`** = `state | check-kind (see/do/signal) | target | config-class`. It groups
+cases that fail for the *same reason*, so triage can dismiss a whole group at
+once. This is the mechanism that makes "50 broken paths" cheap to triage.
 
 ---
 
-## 8. Triage skill (Claude)
+## 5. Triage AI — the feedback loop
 
-Reads `reports/` + the git diff of the regenerated `maze.py`. Per finding:
+For one case: **replay the exact steps**, observe, and judge.
 
-- **Real regression** — L1 crash / `accept` failure, or an L2 diff reflecting genuine
-  behavior loss.
-- **Legit change** — app intentionally changed; the new maze is correct → bless it as
-  the baseline.
-- **Flaky / phantom** — volatile region leaked → propose a `volatile` addition, not a
-  bug.
+- **Real problem** → **alert the user** ("element X hidden on mobile at /lobby",
+  with steps + screenshot).
+- **False positive** → do **both**:
+  1. **Fix the script's root cause** — correct the wrong expectation in the map
+     (e.g. that element is *meant* to be hidden on mobile).
+  2. **Suppress the signature** — add it to a **suppression list** (a data file
+     the engine reads) so every sibling case with that signature is skipped, this
+     run and future runs. Keeps triage focused on genuinely-new cases.
 
-Output: prioritized findings (severity × reachability × confidence) + recommended
-action each (file bug / accept maze / patch volatile).
-
----
-
-## 9. Build order
-
-1. **Framework skeleton** — `Node`/`Site`/`Role`/`Budgets`, `page.py`, `player.py`
-   loop, `policy.py`. Prove it against a **hand-written** `maze.py` + a throwaway
-   target, L1 only.
-2. **Matcher + materialize** — node resolution and the normalized graph form.
-3. **L2 differential oracle** — diff materialized maze vs baseline.
-4. **Crawl skill** — generate `maze.py` from a live site.
-5. **Triage skill** — consume reports + maze diff.
-
-The matcher (§4) and the safety policy (§7) decide whether this finds real bugs or
-drowns in noise — they get the most care.
+So two stores: the **map/script** (root-cause fixes go here) and a **suppression
+list** keyed by signature (per-case dismissals go here).
 
 ---
 
-## Open questions (deferred, not blocking)
+## 6. Internal logic (the run loop)
 
-- **Matcher granularity** — tune against a real app; start coarse (role + name +
-  landmarks), tighten if states over-collapse or go ambiguous.
-- **Form input intelligence** — v1 uses `Site.seed_data` by field semantic; smarter,
-  validation-aware generation is later (candidate for L3).
-- **Running generated code** — the maze is executable Python the crawl skill wrote.
-  Acceptable here (user's own tool, own staging), but worth remembering it's not a
-  sandbox.
-- **Parallelism** — v1 is single-session sequential; parallel players need per-worker
-  isolation (fine with reset hooks, tricky without).
+1. Load the **map** + the **suppression list**; start the browser.
+2. For each state, for each **viewport**: drive to the state (via a known path),
+   run expectation + signal checks.
+3. For each **form**: run the fuzz set; check valid→success, invalid→graceful.
+4. For each **toggle**: open → check reveals/hides; close → inverse.
+5. Try alternate **navigation sequences** into the state.
+6. Any failed check whose signature isn't suppressed → record a breakage case.
+7. Stop at budget; emit the cases (grouped by signature).
+
+---
+
+## 7. Inputs / outputs at a glance
+
+- **Given:** the map (from the Explorer), run params (seed, which dimensions,
+  budgets, viewports), the suppression list, and a browser.
+- **Returns:** breakage cases — each a reproducible `(config + steps + failed
+  check + evidence)`, grouped by signature. Exit non-zero if any un-suppressed
+  case exists (CI-friendly).
+
+---
+
+## 8. What we reuse vs. re-aim from the current build
+
+**Reuse as-is** (already works against real sites):
+- the real-browser driver — visible-match clicking, JS-scroll, popup/cookie
+  dismissal;
+- deterministic **replay by seed**;
+- the **safety fence** (domain allowlist, destructive/external gating);
+- the report/finding + evidence plumbing.
+
+**Re-aim:**
+- the `Node` graph → the richer **map** (element inventory + expectations + form
+  constraints + toggles);
+- the `Player` "walk" → the **variation/stress runner** (the four dimensions);
+- the oracles → **expectation checks + perf/signals**;
+- add the **signature + suppression** machinery for the triage loop.
+
+---
+
+## 9. Build order (after this spec is approved)
+
+1. **Map schema** — `State` + the unified `Element` (visibility + optional
+   informational/interactive aspects: `click`/`fill`/`submit`/`toggle`); loader +
+   the in-memory fake driver updated to model per-element visibility states.
+2. **Stress runner core** — viewport + expectation checks against a hand-written
+   map + throwaway target (prove the loop browser-free, then live).
+3. **Form fuzzing** + graceful-failure checks.
+4. **Toggles + navigation-sequence** variation.
+5. **Signatures + suppression list**.
+6. **① Explorer skill** — generate a map from a live site.
+7. **③ Triage skill** — replay, judge, alert / (fix + suppress).
+
+---
+
+## 10. Open questions (not blocking the spec)
+
+- **Perf thresholds** — one global "slow" budget, or per-state? (start global.)
+- **Extra environment dimensions** — browser type, network throttling, dark mode
+  — later dimensions once the four core ones work.
+- **Conditional expectations** — how rich the "hidden until X" language needs to
+  be (a predicate on state) vs. a simple per-state list.
+- **How the Explorer emits the map** — it writes the code-as-config script; do we
+  also want a machine-readable data form it round-trips through? (default: just
+  the script.)
