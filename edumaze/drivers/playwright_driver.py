@@ -6,6 +6,7 @@ protocol the in-memory driver does, so mazes run unchanged.
 """
 from __future__ import annotations
 
+import time
 from typing import List, Optional
 
 
@@ -15,6 +16,7 @@ class PlaywrightPage:
         self._status: Optional[int] = None
         self._console: List[str] = []
         self._allow = host_allowlist or []
+        self._last_load_ms: Optional[int] = None
         pw_page.on("console", self._on_console)
         pw_page.on("response", self._on_response)
 
@@ -48,9 +50,15 @@ class PlaywrightPage:
     def console_errors(self) -> List[str]:
         return list(self._console)
 
+    @property
+    def last_load_ms(self) -> Optional[int]:
+        return self._last_load_ms
+
     def goto(self, path: str) -> None:
         self._reset_page_signals()
+        t0 = time.perf_counter()
         resp = self._page.goto(path)
+        self._last_load_ms = int((time.perf_counter() - t0) * 1000)
         if resp is not None:
             self._status = resp.status
 
@@ -60,6 +68,9 @@ class PlaywrightPage:
 
     def wait(self, ms: int) -> None:
         self._page.wait_for_timeout(ms)
+
+    def set_viewport(self, width: int, height: int) -> None:
+        self._page.set_viewport_size({"width": width, "height": height})
 
     def by_role(self, role: str, name: Optional[str] = None):
         loc = (self._page.get_by_role(role, name=name) if name
@@ -136,6 +147,13 @@ class _Loc:
 
     exists = visible
 
+    def enabled(self) -> bool:
+        els = self._visible_elements()
+        try:
+            return (els[0] if els else self._raw.first).is_enabled()
+        except Exception:
+            return False
+
     def text(self) -> str:
         els = self._visible_elements()
         try:
@@ -154,7 +172,9 @@ class _Loc:
                 except Exception:
                     pass
                 try:
+                    t0 = time.perf_counter()
                     el.click(timeout=4000)
+                    self._page._last_load_ms = int((time.perf_counter() - t0) * 1000)
                     return
                 except Exception as exc:  # try the next visible match
                     last_err = exc

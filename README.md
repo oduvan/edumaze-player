@@ -1,65 +1,61 @@
 # edumaze-player
 
-A **universal, code-first exploratory tester**. Model any web app as a *maze* (a
-graph of states), then let a *player* walk it like a monkey — poking forms,
-clicking things, trying cases — and report what's broken with a deterministic
-replay path.
+A deterministic **breakage-hunter** for websites. Given a **map** of a site, it
+varies configurations — viewport sizes, form inputs, menu toggles, navigation
+paths — and reports the conditions under which something breaks.
 
-The maze is **code, not data**: a self-describing Python script built from the
-`edumaze` framework. See [`docs/architecture.md`](docs/architecture.md) for the
-full design.
+Three parts (see [`docs/architecture.md`](docs/architecture.md)):
 
-## Status
+- **① Explorer AI** *(not built yet)* — crawls a site once and writes the map.
+- **② The engine** *(this repo)* — cheap & deterministic; stress-tests the map and
+  emits **breakage cases**.
+- **③ Triage AI** *(not built yet)* — replays a case, confirms real vs. false; real
+  → alert; false → fix the map + suppress the case's signature.
 
-Framework core is built, unit-tested (browser-free, via an in-memory driver),
-**and validated against a live site** (`sites/edumaze/maze.py` walks
-`edumaze.lyabah.com` with the real Playwright driver):
+## The map
 
-- `edumaze/` — the framework: `Node`, `Site`, `Role`, `Budgets`, the walk `Player`,
-  matcher, oracles (L1 technical + acceptance, L2 differential), safety policy,
-  locators (role / placeholder / text / css), SPA settle-polling, and a
-  real-browser Playwright adapter.
-- `edumaze/drivers/fake.py` — an in-memory driver to exercise a maze without a
-  browser (used by the tests, and handy for maze authors).
-- `tests/example_maze.py` — a reference hand-written maze + matching fake app,
-  with two deliberately broken states.
-- `sites/edumaze/maze.py` — a real maze for a live SPA (landing → create game →
-  lobby → exit).
-
-Not built yet: the **crawl skill** (generate a maze from a live site) and the
-**triage skill** (classify/prioritize reports).
-
-## Run the tests
-
-```bash
-python3 -m pytest -q
-```
-
-## Walk a real site (needs a browser)
-
-```bash
-pip install -e ".[playwright]" && playwright install chromium
-edumaze run path/to/maze.py --mode explore --seed 1
-```
-
-## The maze in one glance
+One `State` per page; one list of `Element`s per state. Every element carries a
+visible/hidden expectation and may be informational, interactive, or both.
 
 ```python
-from edumaze import Node, Site, Role, Budgets
+from edumaze import State, Element, Submit, Field, Toggle, Click, role, text, placeholder
 
-class Dashboard(Node):
-    url = "/dashboard"
-    def matches(self, page):                 # how to recognize this state
-        return page.by_role("heading", name="Dashboard").visible()
-    def options(self):                       # the outgoing edges
-        return [self.go("Settings", to=Settings),
-                self.submit("Search", fields={"Query": "text"}, to=Results)]
-    def accept(self, page):                  # acceptance criteria, as code
-        assert page.by_role("navigation").visible(), "nav missing"
+class Lobby(State):
+    url = "/lobby"
+    def elements(self):
+        return [
+            Element(text("Room"), info=True),                        # must be visible
+            Element(role("button", "Menu"),                          # interactive toggle
+                    toggle=Toggle(reveals=[text("Settings")])),
+            Element(text("Settings"), visible=False),                # hidden until menu opens
+            Element(role("button", "Create"),                        # a fuzzable form
+                    submit=Submit(fields=[Field(placeholder("Name"), required=True, max_len=20)],
+                                  on_valid=Game)),
+        ]
+```
 
-class ExampleSite(Site):
-    base_url = "https://staging.example.com"
-    entry = Dashboard
-    roles = [Role("admin", login=login_admin)]
-    budgets = Budgets(max_actions=500)
+## What it checks (the oracle)
+
+- **See** — every element's actual visibility matches its expectation.
+- **Do** — every interactive element is usable and does what it's declared to do
+  (links navigate, toggles reveal/hide, valid submits succeed, invalid submits
+  fail gracefully).
+- **Signals** — dead links, JS/HTTP errors, slow loads.
+
+…run across each **viewport**, with **form fuzzing** on every submit.
+
+## Output
+
+Breakage cases, each `state + config + failed check + replay steps`, tagged with a
+**signature** (`state | see/do/signal | target | config`) so triage can dismiss or
+fix a whole group at once.
+
+## Run
+
+```bash
+python3 -m pytest -q                       # browser-free tests (fake driver)
+
+pip install -e ".[playwright]" && playwright install chromium
+edumaze run path/to/map.py --seed 1        # against a real browser
+edumaze run path/to/map.py --suppress known.txt   # skip triage-dismissed signatures
 ```
