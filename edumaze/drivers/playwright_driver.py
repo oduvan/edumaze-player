@@ -136,8 +136,17 @@ class _Loc:
         for i in range(min(n, 25)):
             el = self._raw.nth(i)
             try:
-                if el.is_visible():
-                    out.append(el)
+                if not el.is_visible():
+                    continue
+                # Playwright's is_visible() ignores off-canvas positioning, so a
+                # closed drawer/menu translated off-screen (e.g. translateX(-100%))
+                # still reads "visible". Require the box to actually be on-screen.
+                box = el.bounding_box()
+                if box is None:
+                    continue
+                if box["x"] + box["width"] <= 0 or box["y"] + box["height"] <= 0:
+                    continue  # entirely off the top/left — not user-visible
+                out.append(el)
             except Exception:
                 continue
         return out
