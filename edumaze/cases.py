@@ -44,15 +44,21 @@ class Report:
     cases: List[BreakageCase] = field(default_factory=list)
     states_checked: List[str] = field(default_factory=list)
     configs_run: int = 0
+    actions_taken: int = 0        # navigations/submits performed (a load metric)
 
     def to_dict(self) -> dict:
+        by_kind: Dict[str, int] = {}
+        for c in self.cases:
+            by_kind[c.kind] = by_kind.get(c.kind, 0) + 1
         return {
             "site_id": self.site_id,
             "seed": self.seed,
             "configs_run": self.configs_run,
             "states_checked": self.states_checked,
+            "actions_taken": self.actions_taken,
             "case_count": len(self.cases),
             "unique_signatures": len({c.signature for c in self.cases}),
+            "cases_by_kind": by_kind,
             "cases": [c.to_dict() for c in self.cases],
         }
 

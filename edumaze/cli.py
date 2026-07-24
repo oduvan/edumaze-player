@@ -58,12 +58,17 @@ def main(argv=None) -> int:
         suppressions = {ln.strip() for ln in args.suppress.read_text().splitlines()
                         if ln.strip() and not ln.startswith("#")}
 
+    import time
     from .drivers.playwright_driver import launch
+    t0 = time.perf_counter()
     with launch(site.base_url, headless=not args.headed) as page:
         report = Engine(site, page, seed=args.seed, mode=args.mode,
                         suppressions=suppressions).run()
 
-    print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    out = report.to_dict()
+    out["duration_ms"] = int((time.perf_counter() - t0) * 1000)
+    out["suppressed_signatures"] = len(suppressions)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
     return 1 if report.cases else 0
 
 

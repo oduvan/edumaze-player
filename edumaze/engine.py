@@ -40,8 +40,10 @@ class Engine:
             self._report.configs_run += 1
             for state_cls in self.states:
                 if self._out_of_budget():
+                    self._report.actions_taken = self._actions
                     return self._report
                 self._check_state(state_cls, vp)
+        self._report.actions_taken = self._actions
         return self._report
 
     # -- per-state checks --------------------------------------------------

@@ -4,13 +4,17 @@ A deterministic **breakage-hunter** for websites. Given a **map** of a site, it
 varies configurations — viewport sizes, form inputs, menu toggles, navigation
 paths — and reports the conditions under which something breaks.
 
-Three parts (see [`docs/architecture.md`](docs/architecture.md)):
+One skill drives the whole loop; a cheap deterministic engine does the grinding
+(see [`docs/architecture.md`](docs/architecture.md)):
 
-- **① Explorer AI** *(not built yet)* — crawls a site once and writes the map.
-- **② The engine** *(this repo)* — cheap & deterministic; stress-tests the map and
-  emits **breakage cases**.
-- **③ Triage AI** *(not built yet)* — replays a case, confirms real vs. false; real
-  → alert; false → fix the map + suppress the case's signature.
+- **`/check-site <url>`** — the skill: build the map (or reuse it), run the engine,
+  triage results into real vs. false, report findings + statistics, and self-heal
+  (fix the map or an engine module, suppress confirmed-false cases). Tokens are
+  spent only on building the map and triaging — not on running it.
+- **The engine** — cheap & deterministic; stress-tests the map (viewports, form
+  fuzzing, toggles) and emits **breakage cases** with signatures.
+- **`tools/probe.py`** — dumps any page's structure (elements + form constraints)
+  so the skill can build the map without guessing.
 
 ## The map
 
