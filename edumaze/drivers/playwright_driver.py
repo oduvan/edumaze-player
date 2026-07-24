@@ -22,8 +22,16 @@ class PlaywrightPage:
 
     # -- event capture -----------------------------------------------------
     def _on_console(self, msg) -> None:
-        if msg.type == "error":
-            self._console.append(msg.text)
+        if msg.type != "error":
+            return
+        text = msg.text or ""
+        # "Failed to load resource: net::ERR_*" is a network/resource-load failure,
+        # not a JS error — and it's dominated by third-party tracker/ad/CDN noise
+        # (and environment DNS). Keep only genuine uncaught-JS console errors.
+        # (Broken *first-party* resources deserve a dedicated check later.)
+        if text.startswith("Failed to load resource"):
+            return
+        self._console.append(text)
 
     def _on_response(self, resp) -> None:
         # Track the status of top-level document navigations only.
